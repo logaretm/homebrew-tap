@@ -1,0 +1,88 @@
+name: Update Formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: "Formula name (e.g. smuggle, depnuke)"
+        required: true
+      version:
+        description: "Version without v prefix (e.g. 0.1.0)"
+        required: true
+      repo:
+        description: "Source repo (e.g. logaretm/smuggle)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update formula
+        run: |
+          FORMULA="${{ inputs.formula }}"
+          VERSION="${{ inputs.version }}"
+          REPO="${{ inputs.repo }}"
+
+          declare -A SHAS
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            URL="https://github.com/${REPO}/releases/download/v${VERSION}/${FORMULA}-${target}.tar.gz"
+            echo "Fetching $URL"
+            SHA=$(curl -sfL "$URL" | sha256sum | cut -d' ' -f1)
+            SHAS[$target]=$SHA
+            echo "  $target: $SHA"
+          done
+
+          CLASS_NAME="$(echo "$FORMULA" | sed 's/-/ /g' | sed 's/\b\(.\)/\u\1/g' | sed 's/ //g')"
+
+          cat > "Formula/${FORMULA}.rb" <<EOF
+          class ${CLASS_NAME} < Formula
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v#{version}/${FORMULA}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHAS[aarch64-apple-darwin]}"
+              else
+                url "https://github.com/${REPO}/releases/download/v#{version}/${FORMULA}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHAS[x86_64-apple-darwin]}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v#{version}/${FORMULA}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHAS[aarch64-unknown-linux-gnu]}"
+              else
+                url "https://github.com/${REPO}/releases/download/v#{version}/${FORMULA}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHAS[x86_64-unknown-linux-gnu]}"
+              end
+            end
+
+            def install
+              bin.install "${FORMULA}"
+            end
+
+            test do
+              assert_match "${FORMULA}", shell_output("#{bin}/${FORMULA} --help")
+            end
+          end
+          EOF
+
+          sed -i 's/^          //' "Formula/${FORMULA}.rb"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/
+          git diff --staged --quiet && echo "No changes" && exit 0
+          git commit -m "Update ${{ inputs.formula }} to ${{ inputs.version }}"
+          git push
